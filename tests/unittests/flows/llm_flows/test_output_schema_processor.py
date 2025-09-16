@@ -258,9 +258,7 @@ async def test_output_schema_helper_functions():
 async def test_get_structured_model_response_with_non_ascii():
   """Test get_structured_model_response with non-ASCII characters."""
   from google.adk.events.event import Event
-  from google.adk.flows.llm_flows._output_schema_processor import (
-      get_structured_model_response,
-  )
+  from google.adk.flows.llm_flows._output_schema_processor import get_structured_model_response
   from google.genai import types
 
   # Test with a dictionary containing non-ASCII characters
