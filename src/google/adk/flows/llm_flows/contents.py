@@ -40,8 +40,10 @@ class _ContentLlmRequestProcessor(BaseLlmRequestProcessor):
     from ...agents.llm_agent import LlmAgent
 
     agent = invocation_context.agent
-    if not isinstance(agent, LlmAgent):
-      return
+
+    # Preserve all contents that were added by instruction processor
+    # (since llm_request.contents will be completely reassigned below)
+    instruction_related_contents = llm_request.contents
 
     if agent.include_contents == 'default':
       # Include full conversation history
@@ -58,6 +60,11 @@ class _ContentLlmRequestProcessor(BaseLlmRequestProcessor):
           agent.name,
       )
 
+    # Add instruction-related contents to proper position in conversation
+    await _add_instructions_to_user_content(
+        invocation_context, llm_request, instruction_related_contents
+    )
+
     # Maintain async generator behavior
     if False:  # Ensures it behaves as a generator
       yield  # This is a no-op but maintains generator structure
@@ -71,7 +78,7 @@ def _rearrange_events_for_async_function_responses_in_history(
 ) -> list[Event]:
   """Rearrange the async function_response events in the history."""
 
-  function_call_id_to_response_events_index: dict[str, list[Event]] = {}
+  function_call_id_to_response_events_index: dict[str, int] = {}
   for i, event in enumerate(events):
     function_responses = event.get_function_responses()
     if function_responses:
@@ -128,7 +135,8 @@ def _rearrange_events_for_latest_function_response(
   Returns:
     A list of events with the latest function_response rearranged.
   """
-  if not events:
+  if len(events) < 2:
+    # No need to process, since there is no function_call.
     return events
 
   function_responses = events[-1].get_function_responses()
@@ -214,6 +222,9 @@ def _contains_empty_content(event: Event) -> bool:
   Returns:
     True if the event should be skipped, False otherwise.
   """
+  if event.actions and event.actions.compaction:
+    return False
+
   return (
       not event.content
       or not event.content.role
@@ -225,17 +236,40 @@ def _contains_empty_content(event: Event) -> bool:
 def _get_contents(
     current_branch: Optional[str], events: list[Event], agent_name: str = ''
 ) -> list[types.Content]:
-  """Get the contents for the LLM request.
+  """Retrieves and processes events into a list of Contents for the LLM request.
 
-  Applies filtering, rearrangement, and content processing to events.
+  This function prepares the conversation history for the LLM by applying
+  several transformations:
+  1.  **Initial Filtering**: Removes events that are empty, do not belong
+      to the current invocation branch, or are related to authentication
+      or request confirmation.
+  2.  **Compaction Handling**: Identifies the latest compaction event. If found,
+      it replaces all events covered by the compaction range with the compacted
+      summary content. Only events *after* the compaction's end timestamp
+      are included in addition to the summary. If no compaction event exists,
+      all filtered events are considered.
+  3.  **Transcription Aggregation**: Combines consecutive
+      `input_transcription` and `output_transcription` events into single
+      'user' and 'model' role `types.Content` events, respectively.
+  4.  **Multi-Agent Presentation**: Reformats messages from other agents
+      (i.e., not the current `agent_name` and not 'user') to be presented
+      as user-role context, prefixed with `[agent_name] said:`. Compactor
+      events are included directly without reformatting.
+  5.  **Function Call/Response Rearrangement**: Ensures proper pairing of
+      asynchronous function calls and responses within the event history.
+  6.  **Content Conversion**: Converts the final list of processed events
+      into `types.Content` objects, removing any client-side function call IDs.
 
   Args:
-    current_branch: The current branch of the agent.
-    events: Events to process.
-    agent_name: The name of the agent.
+    current_branch: The current invocation branch ID. Events outside this branch
+      will be filtered out.
+    events: A list of session events to process.
+    agent_name: The name of the agent currently running. Used to distinguish
+      between events from the current agent, other agents, and the user.
 
   Returns:
-    A list of processed contents.
+    A list of `types.Content` objects representing the conversation history
+    to be sent to the LLM.
   """
   accumulated_input_transcription = ''
   accumulated_output_transcription = ''
@@ -258,18 +292,55 @@ def _get_contents(
 
     raw_filtered_events.append(event)
 
+  # Find the latest compaction event.
+  latest_compaction_event = None
+  for event in reversed(raw_filtered_events):
+    if event.actions and event.actions.compaction:
+      latest_compaction_event = event
+      break
+
+  events_to_process = []
+  if latest_compaction_event:
+    compaction = latest_compaction_event.actions.compaction
+    if (
+        compaction.start_timestamp is not None
+        and compaction.end_timestamp is not None
+    ):
+      # Add the compacted event itself.
+      new_event = Event(
+          timestamp=compaction.end_timestamp,
+          author='compactor',
+          content=compaction.compacted_content,
+          branch=latest_compaction_event.branch,
+          invocation_id=latest_compaction_event.invocation_id,
+          actions=latest_compaction_event.actions,
+      )
+      events_to_process.append(new_event)
+
+      # Add events from raw_filtered_events that are *after* the
+      # latest compaction's end timestamp.
+      for event in raw_filtered_events:
+        if event.timestamp > compaction.end_timestamp:
+          events_to_process.append(event)
+  else:
+    # No compaction events, process all raw filtered events.
+    events_to_process = raw_filtered_events
+
+  # Sort by timestamp to ensure chronological order.
+  events_to_process.sort(key=lambda x: x.timestamp)
+
   filtered_events = []
   # aggregate transcription events
-  for i in range(len(raw_filtered_events)):
-    event = raw_filtered_events[i]
+  for i in range(len(events_to_process)):
+    event = events_to_process[i]
     if not event.content:
       # Convert transcription into normal event
       if event.input_transcription and event.input_transcription.text:
         accumulated_input_transcription += event.input_transcription.text
         if (
-            i != len(raw_filtered_events) - 1
-            and raw_filtered_events[i + 1].input_transcription
-            and raw_filtered_events[i + 1].input_transcription.text
+            i != len(events_to_process) - 1
+            and events_to_process[i + 1].input_transcription
+            and events_to_process[i + 1].input_transcription.text
         ):
           continue
         event = event.model_copy(deep=True)
@@ -282,9 +353,9 @@ def _get_contents(
       elif event.output_transcription and event.output_transcription.text:
         accumulated_output_transcription += event.output_transcription.text
         if (
-            i != len(raw_filtered_events) - 1
-            and raw_filtered_events[i + 1].output_transcription
-            and raw_filtered_events[i + 1].output_transcription.text
+            i != len(events_to_process) - 1
+            and events_to_process[i + 1].output_transcription
+            and events_to_process[i + 1].output_transcription.text
         ):
           continue
         event = event.model_copy(deep=True)
@@ -313,8 +384,9 @@ def _get_contents(
   contents = []
   for event in result_events:
     content = copy.deepcopy(event.content)
-    remove_client_function_call_id(content)
-    contents.append(content)
+    if content:
+      remove_client_function_call_id(content)
+      contents.append(content)
   return contents
 
 
@@ -343,6 +415,8 @@ def _get_current_turn_contents(
   # Find the latest event that starts the current turn and process from there
   for i in range(len(events) - 1, -1, -1):
     event = events[i]
+    if not event.content:
+      continue
     if event.author == 'user' or _is_other_agent_reply(agent_name, event):
       return _get_contents(current_branch, events[i:], agent_name)
 
@@ -557,3 +631,43 @@ def _is_live_model_audio_event(event: Event) -> bool:
     if part.file_data and part.file_data.mime_type == 'audio/pcm':
       return True
   return False
+
+
+async def _add_instructions_to_user_content(
+    invocation_context: InvocationContext,
+    llm_request: LlmRequest,
+    instruction_contents: list,
+) -> None:
+  """Insert instruction-related contents at proper position in conversation.
+
+  This function inserts instruction-related contents (passed as parameter) at the
+  proper position in the conversation flow, specifically before the last continuous
+  batch of user content to maintain conversation context.
+
+  Args:
+    invocation_context: The invocation context
+    llm_request: The LLM request to modify
+    instruction_contents: List of instruction-related contents to insert
+  """
+  if not instruction_contents:
+    return
+
+  # Find the insertion point: before the last continuous batch of user content
+  # Walk backwards to find the first non-user content, then insert after it
+  insert_index = len(llm_request.contents)
+
+  if llm_request.contents:
+    for i in range(len(llm_request.contents) - 1, -1, -1):
+      if llm_request.contents[i].role != 'user':
+        insert_index = i + 1
+        break
+      elif i == 0:
+        # All content from start is user content
+        insert_index = 0
+        break
+  else:
+    # No contents remaining, just append at the end
+    insert_index = 0
+
+  # Insert all instruction contents at the proper position using efficient slicing
+  llm_request.contents[insert_index:insert_index] = instruction_contents
