@@ -34,6 +34,7 @@ from google.cloud.bigquery_storage_v1 import types as bq_storage_types
 from google.genai import types
 import pyarrow as pa
 
+from .. import version
 from ..agents.base_agent import BaseAgent
 from ..agents.callback_context import CallbackContext
 from ..events.event import Event
@@ -385,7 +386,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
         client_info = gapic_client_info.ClientInfo(
-            user_agent="google-adk-bq-logger"
+            user_agent=f"google-adk-bq-logger/{version.__version__}"
         )
         self._bq_client = bigquery.Client(
             project=self._project_id, credentials=creds, client_info=client_info
