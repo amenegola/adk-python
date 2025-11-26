@@ -236,8 +236,8 @@ def _recursive_smart_truncate(obj: Any, max_len: int) -> Any:
     return obj
   elif isinstance(obj, dict):
     return {k: _recursive_smart_truncate(v, max_len) for k, v in obj.items()}
-  elif isinstance(obj, list):
-    return [_recursive_smart_truncate(i, max_len) for i in obj]
+  elif isinstance(obj, (list, tuple)):
+    return type(obj)(_recursive_smart_truncate(i, max_len) for i in obj)
   else:
     return obj
 
