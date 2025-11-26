@@ -34,7 +34,6 @@ from google.cloud.bigquery_storage_v1.services.big_query_write.async_client impo
 from google.genai import types
 import pyarrow as pa
 
-from .. import version
 from ..agents.base_agent import BaseAgent
 from ..agents.callback_context import CallbackContext
 from ..events.event import Event
@@ -382,7 +381,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
         client_info = gapic_client_info.ClientInfo(
-            user_agent=f"google-adk-bq-logger/{version.__version__}"
+            user_agent="google-adk-bq-logger"
         )
         self._bq_client = bigquery.Client(
             project=self._project_id, credentials=creds, client_info=client_info
@@ -585,7 +584,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     if user_message and user_message.parts:
       text_content = " ".join([p.text for p in user_message.parts if p.text])
 
-    payload = {"text": text_content}
+    payload = {"text": text_content if text_content else None}
 
     await self._log(
         {
@@ -647,7 +646,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
         "text": " ".join(text_parts) if text_parts else None,
         "tool_calls": tool_calls if tool_calls else None,
         "tool_responses": tool_responses if tool_responses else None,
-        "raw_role": event.author,
+        "raw_role": event.author if event.author else None,
     }
 
     await self._log(
@@ -750,8 +749,8 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
         params["max_output_tokens"] = cfg.max_output_tokens
 
     # 2. System Instruction
-    system_instr = "None"
-    if llm_request.config and llm_request.config.system_instruction:
+    system_instr = None
+    if llm_request.config and llm_request.config.system_instruction is not None:
       si = llm_request.config.system_instruction
       if isinstance(si, str):
         system_instr = si
@@ -759,6 +758,16 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
         system_instr = "".join(p.text for p in si.parts if p.text)
       elif isinstance(si, types.Part):
         system_instr = si.text
+      elif hasattr(si, "__iter__"):
+        texts = []
+        for item in si:
+          if isinstance(item, str):
+            texts.append(item)
+          elif isinstance(item, types.Part) and item.text:
+            texts.append(item.text)
+        system_instr = "".join(texts)
+      else:
+        system_instr = str(si)
 
     # 3. Prompt History (Simplified structure for JSON)
     prompt_history = []
@@ -843,7 +852,10 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
           ),
       }
 
-    payload = {"response_content": content_parts, "usage": usage}
+    payload = {
+        "response_content": content_parts if content_parts else None,
+        "usage": usage if usage else None,
+    }
 
     await self._log(
         {
@@ -876,10 +888,11 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
+    
     payload = {
-        "tool_name": tool.name,
-        "description": tool.description,
-        "arguments": tool_args,
+        "tool_name": tool.name if tool.name else None,
+        "description": tool.description if tool.description else None,
+        "arguments": tool_args if tool_args else None,
     }
     await self._log(
         {
@@ -910,7 +923,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
-    payload = {"tool_name": tool.name, "result": result}
+    payload = {"tool_name": tool.name if tool.name else None, "result": result if result else None}
     await self._log(
         {
             "event_type": "TOOL_COMPLETED",
@@ -964,7 +977,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
-    payload = {"tool_name": tool.name, "arguments": tool_args}
+    payload = {"tool_name": tool.name if tool.name else None, "arguments": tool_args if tool_args else None}
     await self._log(
         {
             "event_type": "TOOL_ERROR",

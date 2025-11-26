@@ -143,7 +143,7 @@ def mock_write_client():
 
 @pytest.fixture
 def dummy_arrow_schema():
-  # UPDATED: content is pa.string() because JSON is serialized to string before Arrow
+  # content is pa.string() because JSON is serialized to string before Arrow
   return pa.schema([
       pa.field("timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
       pa.field("event_type", pa.string(), nullable=True),
@@ -259,6 +259,9 @@ class TestBigQueryAgentAnalyticsPlugin:
         invocation_context=invocation_context,
         user_message=types.Content(parts=[types.Part(text="Test")]),
     )
+    # Wait for background tasks
+    await plugin.close()
+
     mock_auth_default.assert_not_called()
     mock_bq_client.assert_not_called()
     mock_write_client.append_rows.assert_not_called()
@@ -289,15 +292,25 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.before_model_callback(
         callback_context=callback_context, llm_request=llm_request
     )
-    await asyncio.sleep(0.01)  # Allow background task to run
+    await plugin.close()  # Wait for write
     mock_write_client.append_rows.assert_called_once()
     mock_write_client.append_rows.reset_mock()
+
+    # Re-init plugin logic since close() shuts it down, but for this test we want to test denial
+    # However, close() cleans up clients. We should probably create a new plugin or just check that the task was not created.
+    # But on_user_message_callback will try to log.
+    # To keep it simple, let's just use a fresh plugin for the second part or assume close() resets state enough to re-run _ensure_init if needed,
+    # but _ensure_init is called inside _perform_write.
+    # Actually, close() sets _is_shutting_down to True, so further logs are ignored.
+    # So we need a new plugin instance or reset _is_shutting_down.
+    plugin._is_shutting_down = False
 
     user_message = types.Content(parts=[types.Part(text="What is up?")])
     await plugin.on_user_message_callback(
         invocation_context=invocation_context, user_message=user_message
     )
-    await asyncio.sleep(0.01)  # Allow background task to run
+    # Since it's denied, no task is created. close() would wait if there was one.
+    await plugin.close()
     mock_write_client.append_rows.assert_not_called()
 
   @pytest.mark.asyncio
@@ -322,11 +335,14 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.on_user_message_callback(
         invocation_context=invocation_context, user_message=user_message
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
     mock_write_client.append_rows.assert_not_called()
 
+    # Reset for next call
+    plugin._is_shutting_down = False
+
     await plugin.before_run_callback(invocation_context=invocation_context)
-    await asyncio.sleep(0.01)
+    await plugin.close()
     mock_write_client.append_rows.assert_called_once()
 
   @pytest.mark.asyncio
@@ -370,7 +386,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.before_model_callback(
         callback_context=callback_context, llm_request=llm_request
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
 
     # Parse JSON
@@ -408,7 +424,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.on_user_message_callback(
         invocation_context=invocation_context, user_message=user_message
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
 
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     content = json.loads(log_entry["content"])
@@ -450,7 +466,7 @@ class TestBigQueryAgentAnalyticsPlugin:
         tool_args={"param": long_val},
         tool_context=tool_context,
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     content = json.loads(log_entry["content"])
 
@@ -487,7 +503,7 @@ class TestBigQueryAgentAnalyticsPlugin:
         tool_context=tool_context,
         result={"res": long_res},
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     content = json.loads(log_entry["content"])
 
@@ -523,7 +539,7 @@ class TestBigQueryAgentAnalyticsPlugin:
         tool_context=tool_context,
         error=ValueError("Oops"),
     )
-    await asyncio.sleep(0.01)
+    await plugin.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     content = json.loads(log_entry["content"])
 
@@ -541,10 +557,11 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.on_user_message_callback(
         invocation_context=invocation_context, user_message=user_message
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "USER_MESSAGE_RECEIVED")
 
+    # UPDATED ASSERTION: Check JSON structure
     content = json.loads(log_entry["content"])
     assert content["text"] == "What is up?"
 
@@ -567,7 +584,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.on_event_callback(
         invocation_context=invocation_context, event=event
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "TOOL_CALL", agent="MyTestAgent")
 
@@ -594,7 +611,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.on_event_callback(
         invocation_context=invocation_context, event=event
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "MODEL_RESPONSE", agent="MyTestAgent")
 
@@ -625,7 +642,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.before_model_callback(
         callback_context=callback_context, llm_request=llm_request
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "LLM_REQUEST")
 
@@ -657,10 +674,11 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.after_model_callback(
         callback_context=callback_context, llm_response=llm_response
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "LLM_RESPONSE")
 
+    # UPDATED ASSERTION: Check structured JSON
     content = json.loads(log_entry["content"])
     assert content["response_content"][0]["type"] == "text"
     assert content["response_content"][0]["text"] == "Model response"
@@ -685,7 +703,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.after_model_callback(
         callback_context=callback_context, llm_response=llm_response
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "LLM_RESPONSE")
 
@@ -707,10 +725,11 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.before_tool_callback(
         tool=mock_tool, tool_args={"param": "value"}, tool_context=tool_context
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "TOOL_STARTING")
 
+    # UPDATED ASSERTION: Check structured JSON
     content = json.loads(log_entry["content"])
     assert content["tool_name"] == "MyTool"
     assert content["description"] == "Description"
@@ -731,10 +750,11 @@ class TestBigQueryAgentAnalyticsPlugin:
         tool_context=tool_context,
         result={"status": "success"},
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "TOOL_COMPLETED")
 
+    # UPDATED ASSERTION: Check structured JSON
     content = json.loads(log_entry["content"])
     assert content["tool_name"] == "MyTool"
     assert content["result"]["status"] == "success"
@@ -755,7 +775,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.on_model_error_callback(
         callback_context=callback_context, llm_request=llm_request, error=error
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "LLM_ERROR")
     assert log_entry["content"] is None
@@ -777,7 +797,7 @@ class TestBigQueryAgentAnalyticsPlugin:
         tool_context=tool_context,
         error=error,
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "TOOL_ERROR")
 
@@ -809,7 +829,9 @@ class TestBigQueryAgentAnalyticsPlugin:
           invocation_context=invocation_context,
           user_message=types.Content(parts=[types.Part(text="Test")]),
       )
-      await asyncio.sleep(0.01)
+      # Wait for the background task (which logs the error) to complete
+      await plugin_with_fail.close()
+
       mock_log_error.assert_any_call("BQ Plugin: Init Failed:", exc_info=True)
     mock_write_client.append_rows.assert_not_called()
 
@@ -832,7 +854,7 @@ class TestBigQueryAgentAnalyticsPlugin:
           invocation_context=invocation_context,
           user_message=types.Content(parts=[types.Part(text="Test")]),
       )
-      await asyncio.sleep(0.01)
+      await bq_plugin_inst.close()
       mock_log_error.assert_called_with(
           "BQ Plugin: Write Error: %s", "Test BQ Error"
       )
@@ -861,7 +883,7 @@ class TestBigQueryAgentAnalyticsPlugin:
           invocation_context=invocation_context,
           user_message=types.Content(parts=[types.Part(text="Test")]),
       )
-      await asyncio.sleep(0.01)
+      await bq_plugin_inst.close()
       mock_log_error.assert_called_with(
           "BQ Plugin: Schema Mismatch. You may need to delete the existing"
           " table if you migrated from STRING content to JSON content."
@@ -889,7 +911,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.before_run_callback(
         invocation_context=invocation_context
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "INVOCATION_STARTING")
     assert log_entry["content"] is None
@@ -905,7 +927,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.after_run_callback(
         invocation_context=invocation_context
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "INVOCATION_COMPLETED")
     assert log_entry["content"] is None
@@ -922,7 +944,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.before_agent_callback(
         agent=mock_agent, callback_context=callback_context
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "AGENT_STARTING")
 
@@ -941,7 +963,7 @@ class TestBigQueryAgentAnalyticsPlugin:
     await bq_plugin_inst.after_agent_callback(
         agent=mock_agent, callback_context=callback_context
     )
-    await asyncio.sleep(0.01)
+    await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
     _assert_common_fields(log_entry, "AGENT_COMPLETED")
 
