@@ -671,7 +671,9 @@ class TestBigQueryAgentAnalyticsPlugin:
     _assert_common_fields(log_entry, "MODEL_RESPONSE", agent="MyTestAgent")
 
     content = json.loads(log_entry["content"])
-    assert content["text"] == "Hello there!"
+    assert content["content_parts"][0]["type"] == "text"
+    assert content["content_parts"][0]["text"] == "Hello there!"
+
     assert log_entry["timestamp"] == datetime.datetime(
         2025, 10, 22, 11, 0, 0, tzinfo=datetime.timezone.utc
     )

@@ -633,27 +633,48 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     1. Event type (determined from event properties)
     2. Event content (text, function calls, or responses)
     3. Error messages (if any)
-
-    The content is formatted as a structured JSON object based on the event type.
-    If individual string fields exceed `max_content_length`, they are truncated
-    to preserve the valid JSON structure.
     """
-    # We try to extract text, but keep it simple for generic events
-    text_parts = []
+    # Rename 'text_parts' to 'content_parts' since it holds dicts now
+    content_parts = []
+
+    # tool_calls and tool_responses might still be useful as separate summaries,
+    # or you can rely entirely on content_parts. keeping them for now:
     tool_calls = []
     tool_responses = []
 
     if event.content and event.content.parts:
       for p in event.content.parts:
         if p.text:
-          text_parts.append(p.text)
-        if p.function_call:
+          content_parts.append({"type": "text", "text": p.text})
+        elif p.function_call:
+          content_parts.append({
+              "type": "function_call",
+              "name": p.function_call.name,
+              "args": dict(p.function_call.args),
+          })
+          # Optional: keep filling this if you want the high-level summary list
           tool_calls.append(p.function_call.name)
-        if p.function_response:
+        elif p.function_response:
+          content_parts.append(
+              {"type": "function_response", "name": p.function_response.name}
+          )
+          # Optional: keep filling this if you want the high-level summary list
           tool_responses.append(p.function_response.name)
+        elif p.inline_data:
+          content_parts.append({
+              "type": "inline_data",
+              "mime_type": p.inline_data.mime_type,
+          })
+        elif p.file_data:
+          content_parts.append({
+              "type": "file_data",
+              "mime_type": p.file_data.mime_type,
+              "file_uri": p.file_data.file_uri,
+          })
 
     payload = {
-        "text": " ".join(text_parts) if text_parts else None,
+        # CHANGED: Do not join. Store the list of dicts.
+        "content_parts": content_parts if content_parts else None,
         "tool_calls": tool_calls if tool_calls else None,
         "tool_responses": tool_responses if tool_responses else None,
         "raw_role": event.author if event.author else None,
@@ -844,7 +865,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
       for p in llm_response.content.parts:
         if p.text:
           content_parts.append({"type": "text", "text": p.text})
-        if p.function_call:
+        elif p.function_call:
           content_parts.append({
               "type": "function_call",
               "name": p.function_call.name,
