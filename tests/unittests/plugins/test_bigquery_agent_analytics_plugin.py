@@ -297,22 +297,26 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.close()  # Wait for write
     mock_write_client.append_rows.assert_called_once()
     mock_write_client.append_rows.reset_mock()
-
-    # Re-init plugin logic since close() shuts it down, but for this test we want to test denial
-    # However, close() cleans up clients. We should probably create a new plugin or just check that the task was not created.
-    # But on_user_message_callback will try to log.
-    # To keep it simple, let's just use a fresh plugin for the second part or assume close() resets state enough to re-run _ensure_init if needed,
-    # but _ensure_init is called inside _perform_write.
-    # Actually, close() sets _is_shutting_down to True, so further logs are ignored.
-    # So we need a new plugin instance or reset _is_shutting_down.
+    # Re-init plugin logic since close() shuts it down
     plugin._is_shutting_down = False
 
+    # REFACTOR: Use a fresh plugin instance for the denied case
+    plugin_denied = (
+        bigquery_agent_analytics_plugin.BigQueryAgentAnalyticsPlugin(
+            PROJECT_ID, DATASET_ID, TABLE_ID, config
+        )
+    )
+    await plugin_denied._ensure_init()
+    # Inject the same mock_write_client
+    plugin_denied._write_client = mock_write_client
+    plugin_denied._arrow_schema = plugin._arrow_schema
+
     user_message = types.Content(parts=[types.Part(text="What is up?")])
-    await plugin.on_user_message_callback(
+    await plugin_denied.on_user_message_callback(
         invocation_context=invocation_context, user_message=user_message
     )
     # Since it's denied, no task is created. close() would wait if there was one.
-    await plugin.close()
+    await plugin_denied.close()
     mock_write_client.append_rows.assert_not_called()
 
   @pytest.mark.asyncio
@@ -330,6 +334,8 @@ class TestBigQueryAgentAnalyticsPlugin:
     plugin = bigquery_agent_analytics_plugin.BigQueryAgentAnalyticsPlugin(
         PROJECT_ID, DATASET_ID, TABLE_ID, config
     )
+    # Reset for next call
+    plugin._is_shutting_down = False
     await plugin._ensure_init()
     mock_write_client.append_rows.reset_mock()
 
@@ -340,11 +346,21 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.close()
     mock_write_client.append_rows.assert_not_called()
 
-    # Reset for next call
-    plugin._is_shutting_down = False
+    # REFACTOR: Use a fresh plugin instance for the allowed case
+    plugin_allowed = (
+        bigquery_agent_analytics_plugin.BigQueryAgentAnalyticsPlugin(
+            PROJECT_ID, DATASET_ID, TABLE_ID, config
+        )
+    )
+    await plugin_allowed._ensure_init()
+    # Inject the same mock_write_client
+    plugin_allowed._write_client = mock_write_client
+    plugin_allowed._arrow_schema = plugin._arrow_schema
 
-    await plugin.before_run_callback(invocation_context=invocation_context)
-    await plugin.close()
+    await plugin_allowed.before_run_callback(
+        invocation_context=invocation_context
+    )
+    await plugin_allowed.close()
     mock_write_client.append_rows.assert_called_once()
 
   @pytest.mark.asyncio
@@ -398,6 +414,44 @@ class TestBigQueryAgentAnalyticsPlugin:
     assert "system_instruction" not in content
     assert content["model"] == "GEMINI-PRO"
     assert content["prompt"][0]["role"] == "user"
+
+  @pytest.mark.asyncio
+  async def test_content_formatter_error_fallback(
+      self,
+      mock_write_client,
+      invocation_context,
+      mock_auth_default,
+      mock_bq_client,
+      mock_to_arrow_schema,
+      dummy_arrow_schema,
+      mock_asyncio_to_thread,
+  ):
+    """Tests that if content_formatter fails, the original payload is used."""
+
+    def error_formatter(data):
+      raise ValueError("Formatter failed")
+
+    config = BigQueryLoggerConfig(content_formatter=error_formatter)
+    plugin = bigquery_agent_analytics_plugin.BigQueryAgentAnalyticsPlugin(
+        PROJECT_ID, DATASET_ID, TABLE_ID, config
+    )
+    await plugin._ensure_init()
+    mock_write_client.append_rows.reset_mock()
+
+    user_message = types.Content(parts=[types.Part(text="Original message")])
+
+    # This triggers the log. Internal logic catches exception and proceeds.
+    await plugin.on_user_message_callback(
+        invocation_context=invocation_context, user_message=user_message
+    )
+    await plugin.close()
+
+    mock_write_client.append_rows.assert_called_once()
+    log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
+
+    # Verify that despite the error, we still got the original data
+    content = json.loads(log_entry["content"])
+    assert content["text"] == "Original message"
 
   @pytest.mark.asyncio
   async def test_max_content_length_smart_truncation(
@@ -725,7 +779,9 @@ class TestBigQueryAgentAnalyticsPlugin:
     type(mock_tool).name = mock.PropertyMock(return_value="MyTool")
     type(mock_tool).description = mock.PropertyMock(return_value="Description")
     await bq_plugin_inst.before_tool_callback(
-        tool=mock_tool, tool_args={"param": "value"}, tool_context=tool_context
+        tool=mock_tool,
+        tool_args={"param": "value"},
+        tool_context=tool_context,
     )
     await bq_plugin_inst.close()
     log_entry = _get_captured_event_dict(mock_write_client, dummy_arrow_schema)
