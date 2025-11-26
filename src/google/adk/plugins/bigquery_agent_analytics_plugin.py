@@ -647,9 +647,9 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
       for p in event.content.parts:
         if p.text:
           text_parts.append(p.text)
-        if p.function_call:
+        elif p.function_call:
           tool_calls.append(p.function_call.name)
-        if p.function_response:
+        elif p.function_response:
           tool_responses.append(p.function_response.name)
 
     payload = {
