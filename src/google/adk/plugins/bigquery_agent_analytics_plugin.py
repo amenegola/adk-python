@@ -790,9 +790,11 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
           if p.text:
             parts_list.append({"type": "text", "text": p.text})
           elif p.function_call:
-            parts_list.append(
-                {"type": "function_call", "name": p.function_call.name}
-            )
+            parts_list.append({
+                "type": "function_call",
+                "name": p.function_call.name,
+                "args": dict(p.function_call.args),
+            })
           elif p.function_response:
             parts_list.append(
                 {"type": "function_response", "name": p.function_response.name}
