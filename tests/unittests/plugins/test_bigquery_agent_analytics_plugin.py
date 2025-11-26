@@ -297,8 +297,6 @@ class TestBigQueryAgentAnalyticsPlugin:
     await plugin.close()  # Wait for write
     mock_write_client.append_rows.assert_called_once()
     mock_write_client.append_rows.reset_mock()
-    # Re-init plugin logic since close() shuts it down
-    plugin._is_shutting_down = False
 
     # REFACTOR: Use a fresh plugin instance for the denied case
     plugin_denied = (
@@ -334,8 +332,6 @@ class TestBigQueryAgentAnalyticsPlugin:
     plugin = bigquery_agent_analytics_plugin.BigQueryAgentAnalyticsPlugin(
         PROJECT_ID, DATASET_ID, TABLE_ID, config
     )
-    # Reset for next call
-    plugin._is_shutting_down = False
     await plugin._ensure_init()
     mock_write_client.append_rows.reset_mock()
 
@@ -648,6 +644,9 @@ class TestBigQueryAgentAnalyticsPlugin:
     content = json.loads(log_entry["content"])
     assert content["raw_role"] == "MyTestAgent"
     assert content["tool_calls"] == ["get_weather"]
+    assert log_entry["timestamp"] == datetime.datetime(
+        2025, 10, 22, 10, 0, 0, tzinfo=datetime.timezone.utc
+    )
 
   @pytest.mark.asyncio
   async def test_on_event_callback_model_response(
@@ -673,6 +672,9 @@ class TestBigQueryAgentAnalyticsPlugin:
 
     content = json.loads(log_entry["content"])
     assert content["text"] == "Hello there!"
+    assert log_entry["timestamp"] == datetime.datetime(
+        2025, 10, 22, 11, 0, 0, tzinfo=datetime.timezone.utc
+    )
 
   @pytest.mark.asyncio
   async def test_before_model_callback_logs_structure(
