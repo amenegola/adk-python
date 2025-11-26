@@ -123,8 +123,10 @@ def mock_bq_client():
 
 @pytest.fixture
 def mock_write_client():
-  with mock.patch.object(
-      bigquery_agent_analytics_plugin, "BigQueryWriteAsyncClient", autospec=True
+  # Updated patch path to match the new import structure in src
+  with mock.patch(
+      "google.cloud.bigquery_storage_v1.services.big_query_write.async_client.BigQueryWriteAsyncClient",
+      autospec=True,
   ) as mock_cls:
     mock_client = mock_cls.return_value
     mock_client.transport = mock.AsyncMock()

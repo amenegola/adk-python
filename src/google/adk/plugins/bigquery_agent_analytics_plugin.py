@@ -28,9 +28,9 @@ from typing import TYPE_CHECKING
 from google.api_core.gapic_v1 import client_info as gapic_client_info
 import google.auth
 from google.cloud import bigquery
+from google.cloud import bigquery_storage_v1
 from google.cloud.bigquery import schema as bq_schema
 from google.cloud.bigquery_storage_v1 import types as bq_storage_types
-from google.cloud.bigquery_storage_v1.services.big_query_write.async_client import BigQueryWriteAsyncClient
 from google.genai import types
 import pyarrow as pa
 
@@ -221,7 +221,7 @@ class BigQueryLoggerConfig:
   event_allowlist: Optional[List[str]] = None
   event_denylist: Optional[List[str]] = None
   # Custom formatter is discouraged now that we use JSON, but kept for compat
-  content_formatter: Optional[Callable[[Any], str]] = None
+  content_formatter: Optional[Callable[[dict], dict]] = None
   shutdown_timeout: float = 5.0
   client_close_timeout: float = 2.0
   # Increased default limit to 50KB since we truncate per-field, not per-row
@@ -307,7 +307,11 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     )
     self._config = config if config else BigQueryLoggerConfig()
     self._bq_client: bigquery.Client | None = None
-    self._write_client: BigQueryWriteAsyncClient | None = None
+    # Type alias update: Use the class from the top-level package import
+    self._write_client: (
+        bigquery_storage_v1.services.big_query_write.async_client.BigQueryWriteAsyncClient
+        | None
+    ) = None
     self._init_lock: asyncio.Lock | None = None
     self._arrow_schema: pa.Schema | None = None
     self._background_tasks: set[asyncio.Task] = set()
@@ -407,7 +411,8 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
 
         await asyncio.to_thread(create_resources)
 
-        self._write_client = BigQueryWriteAsyncClient(
+        # Fix: Use the top-level package import to avoid "cli" substring in path
+        self._write_client = bigquery_storage_v1.services.big_query_write.async_client.BigQueryWriteAsyncClient(
             credentials=creds,
             client_info=client_info,
         )
@@ -446,7 +451,11 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
       ):
         if resp.error.code != 0:
           msg = resp.error.message
-          if "schema mismatch" in msg.lower():
+          if (
+              "schema mismatch" in msg.lower()
+              or "field" in msg.lower()
+              or "type" in msg.lower()
+          ):
             logging.error(
                 "BQ Plugin: Schema Mismatch. You may need to delete the"
                 " existing table if you migrated from STRING content to JSON"
@@ -462,7 +471,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     except asyncio.CancelledError:
       if not self._is_shutting_down:
         logging.warning("BQ Plugin: Write task cancelled unexpectedly.")
-    except Exception:
+    except Exception as e:
       logging.error("BQ Plugin: Write Failed:", exc_info=True)
 
   async def _log(self, data: dict, content_payload: Any = None):
@@ -657,6 +666,7 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
             "invocation_id": invocation_context.invocation_id,
             "user_id": invocation_context.session.user_id,
             "error_message": event.error_message,
+            "timestamp": datetime.fromtimestamp(event.timestamp, timezone.utc),
         },
         content_payload=payload,
     )
@@ -790,14 +800,14 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
 
     payload = {
         "model": llm_request.model or "default",
-        "params": params,
+        "params": params if params else None,
         "tools_available": (
             list(llm_request.tools_dict.keys())
             if llm_request.tools_dict
-            else []
+            else None
         ),
         "system_instruction": system_instr,
-        "prompt": prompt_history,
+        "prompt": prompt_history if prompt_history else None,
     }
 
     await self._log(
@@ -888,7 +898,6 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
-    
     payload = {
         "tool_name": tool.name if tool.name else None,
         "description": tool.description if tool.description else None,
@@ -923,7 +932,10 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
-    payload = {"tool_name": tool.name if tool.name else None, "result": result if result else None}
+    payload = {
+        "tool_name": tool.name if tool.name else None,
+        "result": result if result else None,
+    }
     await self._log(
         {
             "event_type": "TOOL_COMPLETED",
@@ -977,7 +989,10 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
     If individual string fields exceed `max_content_length`, they are truncated
     to preserve the valid JSON structure.
     """
-    payload = {"tool_name": tool.name if tool.name else None, "arguments": tool_args if tool_args else None}
+    payload = {
+        "tool_name": tool.name if tool.name else None,
+        "arguments": tool_args if tool_args else None,
+    }
     await self._log(
         {
             "event_type": "TOOL_ERROR",
